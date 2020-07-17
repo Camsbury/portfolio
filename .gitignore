@@ -1,0 +1,5 @@
+*.cpcache/
+.envrc
+.nrepl-port
+*scratch.clj
+data/
