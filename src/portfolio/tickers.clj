@@ -1,7 +1,6 @@
 (ns portfolio.tickers
   (:require [base]
             [portfolio.utils :as utils]
-            [portfolio.tickers :as tickers]
             [portfolio.plot :as plot]
             [clj-http.client :as client]
             [clj-time.core :as t]
@@ -12,8 +11,10 @@
             [libpython-clj.require :refer [require-python]]))
 
 (require-python
- '[numpy :as np]
- '[pandas :as pd]
+ '[builtins          :as pyb]
+ '[operator          :as op]
+ '[numpy             :as np]
+ '[pandas            :as pd]
  '[matplotlib.pyplot :as plt])
 
 (def TICKERS-OF-INTEREST
@@ -50,7 +51,7 @@
     (store-history symbol))
   (nippy/thaw-from-file (get-store-path symbol)))
 
-(defn- tc-get-ndarrays [& syms]
+(defn- get-tc-ndarrays [& syms]
   (let [prices (map (comp :prices get-history) syms)
         xf-ind (comp (filter #(some? (:close %)))
                      (map :date))
@@ -70,38 +71,76 @@
 (defn two-ticker-correlation
   "Get the correlation for two tickers"
   [sym-a sym-b]
-  (let [[a b] (tc-get-ndarrays sym-a sym-b)]
+  (let [[a b] (get-tc-ndarrays sym-a sym-b)]
     (utils/py-get-in (np/corrcoef a b) [0 1])))
 
 (defn ticker-correlations
   "Get the correlation for multiple tickers"
   [syms]
-  (let [[a b] (apply tc-get-ndarrays syms)]
+  (let [[a b] (apply get-tc-ndarrays syms)]
     (np/corrcoef a b)))
 
 (defn rolling-ticker-correlation
-  "Plot the rolling correlation for two tickers to a file"
+  "Get the rolling correlation of two tickers.
+  Give a `window` of time to roll over."
   [{:keys [sym-a sym-b window]
     :or {window 30}}]
-  (let [[a b] (tc-get-ndarrays sym-a sym-b)]
+  (let [[a b] (get-tc-ndarrays sym-a sym-b)]
     (-> a
         pd/Series
         (py. rolling window)
         (py. corr (pd/Series b))
         (py. dropna))))
 
+(defn- -sharpe-ratio
+  "determine the Sharpe ratio for an asset"
+  [a b]
+  (op/truediv
+   (np/mean (op/sub a b))
+   (np/std (op/sub a b))))
+
+(defn pct-change
+  "calc % change for a time-series ndarray"
+  [arr]
+  (np/divide
+   (np/diff arr)
+   (py/get-item arr (pyb/slice nil (- 1)))))
+
+(defn sharpe-ratio
+  "determine the Sharpe ratio for an asset"
+  [{:keys [asset-sym riskfree-sym]}]
+  (let [[asset riskfree]
+        (map pct-change (get-tc-ndarrays asset-sym riskfree-sym))]
+    (-sharpe-ratio asset riskfree)))
+
+(defn rolling-sharpe-ratio
+  "Determine a rolling Sharpe Ratio for an asset"
+  [{:keys [asset-sym riskfree-sym window]
+    :or {window 90}}]
+  (let [[asset riskfree]
+        (map pct-change (get-tc-ndarrays asset-sym riskfree-sym))]
+    (py/->numpy
+     (for [i (range window (py/len asset))]
+       (-sharpe-ratio
+        (py/get-item asset (pyb/slice (- i window) i))
+        (py/get-item riskfree (pyb/slice (- i window) i)))))))
+
 (comment
   (two-ticker-correlation "SPY" "NFLX")
 
-  (py.-
-   (rolling-ticker-correlation
-    {:sym-a "SPY"
-     :sym-b "NFLX"})
-   shape)
+  (py/get-item (np/array [1 1.1 1.21 1.331]) (pyb/slice nil (- 1)))
+  (np/divide (np/array [1 2 3]) (np/array [2 4 6]))
 
+  (rolling-sharpe-ratio {:asset-sym "SPY" :riskfree-sym "BIL"})
+
+  (plot/with-show "/tmp/temp.png"
+    (plt/plot (rolling-sharpe-ratio
+               {:asset-sym "SPY"
+                :riskfree-sym "BIL"
+                :window 365})))
 
   (plot/with-show "/tmp/temp.png"
     (plt/plot (rolling-ticker-correlation
                {:sym-a "SPY"
-                :sym-b "GLD"
+                :sym-b "BIL"
                 :window 365}))))
