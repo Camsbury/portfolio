@@ -1,2 +1,3 @@
-(ns portfolio.core)
+(ns portfolio.core
+  (:require [base]))
 
