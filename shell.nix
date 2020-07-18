@@ -6,10 +6,11 @@ let
         pythonPackages: with pythonPackages; [
           matplotlib
           numpy
-          scipy
           pandas
           pillow
           scikitlearn
+          scipy
+          statsmodels
         ]));
 in
   with pkgs;
