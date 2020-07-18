@@ -56,6 +56,26 @@
     (store-history symbol))
   (nippy/thaw-from-file (get-store-path symbol)))
 
+(defn get-ticker-df
+  "Get the history of a ticker as a df"
+  [symbol]
+  {:pre [(s/valid? ::p-spec/sym symbol)]
+   :post [(= (py/python-type %) :data-frame)]}
+  (let [convert
+        (fn [x]
+          (if (= (py.- x name) "date")
+            (pd/to_datetime x :unit "s")
+            x))]
+    (-> symbol
+        get-history
+        :prices
+        pd/DataFrame
+        (py. apply convert))))
+
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;;; Update for Pandas
+
 (defn- get-tc-ndarrays [& syms]
   {:pre [(s/valid? (s/coll-of ::p-spec/sym) syms)]}
   (let [prices (map (comp :prices get-history) syms)
@@ -146,23 +166,7 @@
         (py/get-item riskfree (pyb/slice (- i window) i)))))))
 
 (comment
-  (s/conform (s/coll-of ::p-spec/sym) (pyb/list ["SPY" "NFLX"]))
-  (two-ticker-correlation "SPY" "NFLX")
-
-  (py/get-item (np/array [1 1.1 1.21 1.331]) (pyb/slice nil (- 1)))
-  (np/divide (np/array [1 2 3]) (np/array [2 4 6]))
-
-  (rolling-sharpe-ratio {:sym-a "SPY" :sym-rf "BIL"})
-
-  (plot/with-show "/tmp/temp.png"
-    (plt/plot (rolling-sharpe-ratio
-               {:sym-a "SPY"
-                :sym-rf "BIL"
-                :window 365})))
-
-  (plot/with-show "/tmp/temp.png"
-    (plt/plot (rolling-ticker-correlation
-               {:sym-a "SPY"
-                :sym-b "BIL"
-                :window 365}))))
-  {:pre [(s/valid? ::p-spec/sym symbol)]}
+  (plot/with-show {:dpi 150}
+    (-> "TSLA"
+        get-ticker-df
+        (py. plot :x "date" :y "adjclose"))))
