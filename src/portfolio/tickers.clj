@@ -20,7 +20,7 @@
  '[matplotlib.pyplot :as plt])
 
 (def TICKERS-OF-INTEREST
-  ["GSY" "IAU" "PSR" "FXU" "SPY"])
+  ["GSY" "IAU" "UDN" "PSR" "FXU" "SPY" "QQQ"])
 
 (defn- get-store-path [symbol]
   {:pre [(s/valid? ::p-spec/sym symbol)]}
@@ -65,90 +65,94 @@
         (fn [x]
           (if (= (py.- x name) "date")
             (pd/to_datetime x :unit "s")
-            x))]
-    (-> symbol
-        get-history
-        :prices
-        pd/DataFrame
-        (py. apply convert))))
+            x))
+        df (-> symbol
+               get-history
+               :prices
+               pd/DataFrame
+               (py. apply convert))]
+    (py/set-attr! df "symbol" symbol)
+    df))
 
+(defn get-mergeable
+  "Gets the mergeable form of the ticker data"
+  [symbol]
+  {:pre [(s/valid? ::p-spec/sym symbol)]
+   :post [(= (py/python-type %) :data-frame)]}
+  (-> symbol
+      get-ticker-df
+      (py. rename :columns {:adjclose symbol})
+      (py/get-item (pyb/list (list "date" symbol)))
+      (py. dropna)
+      (py. set_index "date")))
 
-;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
-;;; Update for Pandas
-
-(defn- get-tc-ndarrays [& syms]
-  {:pre [(s/valid? (s/coll-of ::p-spec/sym) syms)]}
-  (let [prices (map (comp :prices get-history) syms)
-        xf-ind (comp (filter #(some? (:close %)))
-                     (map :date))
-        xf-ts      (comp (map #(sequence xf-ind %))
-                         (map set))
-        timestamps (sequence xf-ts prices)
-        valid-timestamps (apply set/intersection timestamps)
-        xf-sym (comp
-                (filter #(some? (:close %)))
-                (filter #(contains? valid-timestamps (:date %)))
-                (map :close))
-        xf-all (comp
-                (map #(sequence xf-sym %))
-                (map py/->numpy))]
-   (sequence xf-all prices)))
+(defn merge-symbols
+  "Merges symbol data"
+  [symbol & syms]
+  {:pre [(s/valid? ::p-spec/sym symbol)
+         (s/valid? (s/coll-of ::p-spec/sym) syms)]
+   :post [(= (py/python-type %) :data-frame)]}
+  (let [base   (get-mergeable symbol)
+        rights (map get-mergeable syms)]
+    (py. base join (pyb/list rights) :how "inner")))
 
 (defn two-ticker-correlation
   "Get the correlation for two tickers"
   [sym-a sym-b]
   {:pre [(s/valid? ::p-spec/sym sym-a)
-         (s/valid? ::p-spec/sym sym-b)]}
-  (let [[a b] (get-tc-ndarrays sym-a sym-b)]
-    (utils/py-get-in (np/corrcoef a b) [0 1])))
+         (s/valid? ::p-spec/sym sym-b)]
+   :post [(= (py/python-type %) :float)]}
+  (-> (merge-symbols sym-a sym-b)
+      (py. corr)
+      (utils/py-get-in [sym-a sym-b])))
 
 (defn ticker-correlations
   "Get the correlation for multiple tickers"
   [& syms]
-  {:pre [(s/valid? (s/coll-of ::p-spec/sym) syms)]}
-  (let [[a b] (apply get-tc-ndarrays syms)]
-    (np/corrcoef a b)))
+  {:pre [(s/valid? (s/coll-of ::p-spec/sym) syms)]
+   :post [(= (py/python-type %) :data-frame)]}
+  (py. (apply merge-symbols syms) corr))
 
 (defn rolling-ticker-correlation
   "Get the rolling correlation of two tickers.
   Give a `window` of time to roll over."
   [{:keys [sym-a sym-b window]
-    :or {window 30}}]
+    :or {window 365}}]
   {:pre [(s/valid? ::p-spec/sym sym-a)
          (s/valid? ::p-spec/sym sym-b)
          (int? window)]}
-  (let [[a b] (get-tc-ndarrays sym-a sym-b)]
-    (-> a
-        pd/Series
+  (let [merged (merge-symbols sym-a sym-b)]
+    (-> (py/get-item merged sym-a)
         (py. rolling window)
-        (py. corr (pd/Series b))
-        (py. dropna))))
+        (py. corr (py/get-item merged sym-b))
+        (py. dropna)
+        (py. rename (str sym-a "/" sym-b)))))
 
 (defn- -sharpe-ratio
-  "determine the Sharpe ratio for an asset"
   [a b]
-  {:pre [(= (py/python-type a) :ndarray)
-         (= (py/python-type b) :ndarray)]}
+  {:pre [(or
+          (= (py/python-type a) :series)
+          (= (py/python-type a) :ndarray))
+         (or
+          (= (py/python-type b) :series)
+          (= (py/python-type b) :ndarray))]
+   :post [(= (py/python-type %) :float)]}
   (op/truediv
    (np/mean (op/sub a b))
    (np/std (op/sub a b))))
-
-(defn pct-change
-  "calc % change for a time-series ndarray"
-  [arr]
-  {:pre [(= (py/python-type arr) :ndarray)]}
-  (np/divide
-   (np/diff arr)
-   (py/get-item arr (pyb/slice nil (- 1)))))
 
 (defn sharpe-ratio
   "determine the Sharpe ratio for an asset"
   [{:keys [sym-a sym-rf]}]
   {:pre [(s/valid? ::p-spec/sym sym-a)
-         (s/valid? ::p-spec/sym sym-rf)]}
-  (let [[asset riskfree]
-        (map pct-change (get-tc-ndarrays sym-a sym-rf))]
-    (-sharpe-ratio asset riskfree)))
+         (s/valid? ::p-spec/sym sym-rf)]
+   :post [(= (py/python-type %) :float)]}
+  (let [merged (-> sym-a
+                   (merge-symbols sym-rf)
+                   (py. pct_change)
+                   (py. dropna))]
+    (-sharpe-ratio (py/get-item merged sym-a)
+                   (py/get-item merged sym-rf))))
 
 (defn rolling-sharpe-ratio
   "Determine a rolling Sharpe Ratio for an asset"
@@ -157,8 +161,28 @@
   {:pre [(s/valid? ::p-spec/sym sym-a)
          (s/valid? ::p-spec/sym sym-rf)
          (int? window)]}
-  (let [[asset riskfree]
-        (map pct-change (get-tc-ndarrays sym-a sym-rf))]
+  (let [merged (-> sym-a
+                   (merge-symbols sym-rf)
+                   (py. pct_change)
+                   (py. dropna))]
+    (-> (py/get-item merged sym-a)
+        (py. rolling window)
+        (py. apply #(-sharpe-ratio % (py/get-item merged sym-rf)))
+        (py. dropna))))
+
+(defn rolling-sharpe-ratio-np ; NOTE: currently much faster
+  "Determine a rolling Sharpe Ratio for an asset using numpy"
+  [{:keys [sym-a sym-rf window]
+    :or {window 90}}]
+  {:pre [(s/valid? ::p-spec/sym sym-a)
+         (s/valid? ::p-spec/sym sym-rf)
+         (int? window)]}
+  (let [merged (-> sym-a
+                   (merge-symbols sym-rf)
+                   (py. pct_change)
+                   (py. dropna))
+        asset (py/get-item merged sym-a)
+        riskfree (py/get-item merged sym-rf)]
     (py/->numpy
      (for [i (range window (py/len asset))]
        (-sharpe-ratio
@@ -166,7 +190,14 @@
         (py/get-item riskfree (pyb/slice (- i window) i)))))))
 
 (comment
-  (plot/with-show {:dpi 150}
-    (-> "TSLA"
+  (plot/with-show {:filename "tmp.png" :dpi 150}
+    (let [c (rolling-ticker-correlation
+             {:sym-a "GOOG"
+              :sym-b "AAPL"
+              :window 365})]
+      (py. c plot :title (py.- c name))))
+
+  (plot/with-show {:filename "tmp.png" :dpi 150}
+    (-> "BIL"
         get-ticker-df
         (py. plot :x "date" :y "adjclose"))))
